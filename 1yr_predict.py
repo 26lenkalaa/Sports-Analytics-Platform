@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import TypedDict
 
 
-# These are ordinary dictionaries with defined field types.
 class Match(TypedDict):
     played_on: date
     home: str
@@ -16,10 +15,11 @@ class Match(TypedDict):
 
 
 MINIMUM_GAMES: int = 5
+HALF_LIFE_DAY: float = 90.0
 
 
 def parse_date(text: str) -> date:
-    return datetime.strptime(text, "%d/%m/%Y").date()
+    return datetime.strptime(text.strip(), "%d/%m/%Y").date()
 
 
 def load_history(source: Path, match_date: date) -> list[Match]:
@@ -27,27 +27,26 @@ def load_history(source: Path, match_date: date) -> list[Match]:
     try:
         start_date: date = match_date.replace(year=match_date.year - 1)
     except ValueError:
-        # February 29 becomes February 28.
         start_date = match_date.replace(
             year=match_date.year - 1,
             day=28,
         )
 
     files: list[Path] = [
-        source/"Premier_League_25-26.csv",
-        source/"Premier_League_26-27.csv"
+        source / "Premier_League_25-26.csv",
+        source / "Premier_League_26-27.csv",
     ]
 
     for filename in files:
         if not filename.is_file():
-            raise FileNotFoundError("File" + str(filename) + "not found.")
+            raise FileNotFoundError(f"File not found: {filename}")
 
     matches: list[Match] = []
     earliest_date: date = date.max
     seen: set[tuple[date, str, str]] = set()
 
     for filename in files:
-        with filename.open(newline="", encoding="utf-8-sig",) as file:
+        with filename.open(newline="", encoding="utf-8-sig") as file:
             for row in csv.DictReader(file):
                 if not row.get("Date", "").strip():
                     continue
@@ -102,61 +101,82 @@ def load_history(source: Path, match_date: date) -> list[Match]:
     return matches
 
 
-def team_rates(matches: list[Match],team: str,at_home: bool,league_scored: float,league_conceded: float,) -> tuple[float, float]:
-    """Return scoring and conceding rates for one venue."""
-    games: int = 0
-    scored: int = 0
-    conceded: int = 0
+def match_weight(played_on: date, match_date: date) -> float:
+    """Recent matches receive more weight."""
+    days_old: int = (match_date - played_on).days
+
+    return math.exp(
+        -math.log(2.0) * days_old / HALF_LIFE_DAY
+    )
+
+
+def team_rates(matches: list[Match], team: str, at_home: bool, league_scored: float, league_conceded: float, match_date: date) -> tuple[float, float]:
+    """Return weighted scoring and conceding rates."""
+    total_weight: float = 0.0
+    scored: float = 0.0
+    conceded: float = 0.0
 
     for match in matches:
+        weight: float = match_weight(match["played_on"], match_date)
+
         if at_home and match["home"] == team:
-            games += 1
-            scored += match["home_goals"]
-            conceded += match["away_goals"]
+            total_weight += weight
+            scored += match["home_goals"] * weight
+            conceded += match["away_goals"] * weight
 
         elif not at_home and match["away"] == team:
-            games += 1
-            scored += match["away_goals"]
-            conceded += match["home_goals"]
+            total_weight += weight
+            scored += match["away_goals"] * weight
+            conceded += match["home_goals"] * weight
 
-    if games >= MINIMUM_GAMES:
-        return scored / games, conceded / games
+    if total_weight >= MINIMUM_GAMES:
+        return scored / total_weight, conceded / total_weight
 
-    # Use a starting estimate only when history is limited.
-    missing_games: int = MINIMUM_GAMES - games
+    # Use league averages when weighted history is limited.
+    missing_weight: float = MINIMUM_GAMES - total_weight
 
     scoring_rate: float = (
-        scored + missing_games * league_scored
+        scored + missing_weight * league_scored
     ) / MINIMUM_GAMES
 
     conceding_rate: float = (
-        conceded + missing_games * league_conceded
+        conceded + missing_weight * league_conceded
     ) / MINIMUM_GAMES
 
     return scoring_rate, conceding_rate
 
 
-def expected_goals(matches: list[Match],home_team: str,away_team: str,) -> tuple[float, float]:
-    """Calculate expected home and away goals."""
-    league_home: float = (
-        sum(match["home_goals"] for match in matches)
-        / len(matches)
-    )
+def expected_goals(matches: list[Match], home_team: str, away_team: str, match_date: date) -> tuple[float, float]:
+    """Calculate expected goals using weighted rates."""
+    if HALF_LIFE_DAY <= 0:
+        raise ValueError("Half-life must be positive.")
 
-    league_away: float = (
-        sum(match["away_goals"] for match in matches)
-        / len(matches)
-    )
+    total_weight: float = 0.0
+    home_goals: float = 0.0
+    away_goals: float = 0.0
+
+    for match in matches:
+        weight: float = match_weight(match["played_on"], match_date)
+
+        total_weight += weight
+        home_goals += match["home_goals"] * weight
+        away_goals += match["away_goals"] * weight
+
+    if total_weight <= 0:
+        raise ValueError("No weighted history available.")
+
+    league_home: float = home_goals / total_weight
+    league_away: float = away_goals / total_weight
 
     if league_home <= 0 or league_away <= 0:
         raise ValueError("League scoring averages must be positive.")
 
     home_scored, home_conceded = team_rates(
-        matches, home_team, True, league_home, league_away
+        matches, home_team, True, league_home, league_away, match_date
     )
 
     away_scored, away_conceded = team_rates(
-        matches, away_team, False, league_away, league_home
+        matches, away_team, False, league_away, league_home, match_date
     )
 
     home_attack: float = home_scored / league_home
@@ -179,7 +199,7 @@ def poisson(goals: int, mean: float) -> float:
     )
 
 
-def predict(home_mean: float, away_mean: float,) -> tuple[dict[str, float], int, int, float, float]:
+def predict(home_mean: float, away_mean: float) -> tuple[dict[str, float], int, int, float, float]:
     """Add scoreline probabilities into three match outcomes."""
     if (
         not math.isfinite(home_mean)
@@ -267,6 +287,7 @@ def main() -> None:
         matches,
         args.home_team,
         args.away_team,
+        match_date,
     )
 
     (
@@ -285,6 +306,7 @@ def main() -> None:
 
     print(f"First historical match used: {first_used:%d/%m/%Y}")
     print(f"Last historical match used: {last_used:%d/%m/%Y}")
+    print(f"Recency half-life: {HALF_LIFE_DAY:g} days")
 
     print(f"Match: {args.home_team} vs {args.away_team}")
     print(f"Prediction date: {match_date:%d/%m/%Y}")
@@ -295,12 +317,17 @@ def main() -> None:
     for outcome, probability in probabilities.items():
         print(f"{outcome}: {probability:.2%}")
 
-    print(f"Most likely exact score: "
-    f"{best_home_goals}-{best_away_goals} "
-    f"(home-away)")
+    print(
+        f"Most likely exact score: "
+        f"{best_home_goals}-{best_away_goals} "
+        f"(home-away)"
+    )
 
-    print(f"Exact-score probability: "
-    f"{best_score_probability / total:.2%}")
+    print(
+        f"Exact-score probability: "
+        f"{best_score_probability / total:.2%}"
+    )
+
 
 if __name__ == "__main__":
     main()
