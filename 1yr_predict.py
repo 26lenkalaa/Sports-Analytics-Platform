@@ -8,6 +8,7 @@ from typing import TypedDict
 
 # These are ordinary dictionaries with defined field types.
 class Match(TypedDict):
+    played_on: date
     home: str
     away: str
     home_goals: int
@@ -32,14 +33,14 @@ def load_history(source: Path, match_date: date) -> list[Match]:
             day=28,
         )
 
-    files: list[Path]
-    if source.is_file():
-        files = [source]
-    else:
-        files = sorted(source.glob("*.csv"))
+    files: list[Path] = [
+        source/"Premier League 24-25.csv",
+        source/"Premier League 25-26.csv",
+    ]
 
-    if not files:
-        raise ValueError("No CSV files found.")
+    for filename in files:
+        if not filename.is_file():
+            raise FileNotFoundError("File" + str(filename) + "not found.")
 
     matches: list[Match] = []
     earliest_date: date = date.max
@@ -85,6 +86,7 @@ def load_history(source: Path, match_date: date) -> list[Match]:
                     raise ValueError("Goals cannot be negative.")
 
                 matches.append({
+                    "played_on": played_on,
                     "home": home,
                     "away": away,
                     "home_goals": home_goals,
@@ -195,6 +197,14 @@ def predict(
     away_mean: float,
 ) -> dict[str, float]:
     """Add scoreline probabilities into three match outcomes."""
+    if (
+        not math.isfinite(home_mean)
+        or not math.isfinite(away_mean)
+        or home_mean < 0
+        or away_mean < 0
+    ):
+        raise ValueError("Expected goals must be finite and nonnegative.")
+    
     probabilities: dict[str, float] = {
         "Home win": 0.0,
         "Draw": 0.0,
@@ -264,6 +274,12 @@ def main() -> None:
         home_mean,
         away_mean,
     )
+
+    first_used: date = min(match["played_on"] for match in matches)
+    last_used: date = max(match["played_on"] for match in matches)
+
+    print(f"First historical match used: {first_used:%d/%m/%Y}")
+    print(f"Last historical match used: {last_used:%d/%m/%Y}")
 
     print(f"Match: {args.home_team} vs {args.away_team}")
     print(f"Prediction date: {match_date:%d/%m/%Y}")
