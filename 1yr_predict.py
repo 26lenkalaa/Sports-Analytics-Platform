@@ -34,8 +34,8 @@ def load_history(source: Path, match_date: date) -> list[Match]:
         )
 
     files: list[Path] = [
-        source/"Premier League 24-25.csv",
-        source/"Premier League 25-26.csv",
+        source/"Premier_League_25-26.csv",
+        source/"Premier_League_26-27.csv"
     ]
 
     for filename in files:

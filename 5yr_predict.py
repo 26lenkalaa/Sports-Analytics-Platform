@@ -24,11 +24,12 @@ def parse_date(text: str) -> date:
 def load_history(source: Path, match_date: date) -> list[Match]:
     """Read all available results before the prediction date."""
     files: list[Path] = [
-        source / "Premier League 21-22.csv",
-        source / "Premier League 22-23.csv",
-        source / "Premier League 23-24.csv",
-        source / "Premier League 24-25.csv",
-        source / "Premier League 25-26.csv",
+        source / "Premier_League_21-22.csv",
+        source / "Premier_League_22-23.csv",
+        source / "Premier_League_23-24.csv",
+        source / "Premier_League_24-25.csv",
+        source / "Premier_League_25-26.csv",
+        source / "Premier_League_26-27.csv",
     ]
 
     for filename in files:
