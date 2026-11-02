@@ -93,13 +93,7 @@ def load_history(source: Path, match_date: date) -> list[Match]:
     return matches
 
 
-def team_rates(
-    matches: list[Match],
-    team: str,
-    at_home: bool,
-    league_scored: float,
-    league_conceded: float,
-) -> tuple[float, float]:
+def team_rates(matches: list[Match], team: str, at_home: bool, league_scored: float, league_conceded: float,) -> tuple[float, float]:
     """Return scoring and conceding rates for one venue."""
     games: int = 0
     scored: int = 0
@@ -133,11 +127,7 @@ def team_rates(
     return scoring_rate, conceding_rate
 
 
-def expected_goals(
-    matches: list[Match],
-    home_team: str,
-    away_team: str,
-) -> tuple[float, float]:
+def expected_goals(matches: list[Match], home_team: str, away_team: str,) -> tuple[float, float]:
     """Calculate expected home and away goals."""
     league_home: float = (
         sum(match["home_goals"] for match in matches)
@@ -196,10 +186,7 @@ def poisson(goals: int, mean: float) -> float:
     )
 
 
-def predict(
-    home_mean: float,
-    away_mean: float,
-) -> dict[str, float]:
+def predict(home_mean: float, away_mean: float) -> tuple[dict[str, float], int, int, float, float]:
     """Add scoreline probabilities into three match outcomes."""
     if (
         not math.isfinite(home_mean)
@@ -227,12 +214,21 @@ def predict(
         for goals in range(21)
     ]
 
+    best_home_goals: int = 0
+    best_away_goals: int = 0
+    best_score_probability: float = -1.0
+
     for home_goals in range(21):
         for away_goals in range(21):
             chance: float = (
                 home_chances[home_goals]
                 * away_chances[away_goals]
             )
+
+            if chance > best_score_probability:
+                best_home_goals = home_goals
+                best_away_goals = away_goals
+                best_score_probability = chance
 
             if home_goals > away_goals:
                 probabilities["Home win"] += chance
@@ -252,7 +248,13 @@ def predict(
     for outcome in probabilities:
         probabilities[outcome] /= total
 
-    return probabilities
+    return (
+        probabilities,
+        best_home_goals,
+        best_away_goals,
+        best_score_probability,
+        total,
+    )
 
 
 def main() -> None:
@@ -281,9 +283,16 @@ def main() -> None:
         args.away_team,
     )
 
-    probabilities: dict[str, float] = predict(
+    (
+probabilities,
+        best_home_goals,
+        best_away_goals,
+        best_score_probability,
+        total,
+    ) = predict(
         home_mean,
         away_mean,
+
     )
 
     first_used: date = min(
@@ -305,6 +314,17 @@ def main() -> None:
 
     for outcome, probability in probabilities.items():
         print(f"{outcome}: {probability:.2%}")
+
+    print(
+    f"Most likely exact score: "
+    f"{best_home_goals}-{best_away_goals} "
+    f"(home-away)"
+)
+
+    print(
+    f"Exact-score probability: "
+    f"{best_score_probability / total:.2%}"
+)
 
 if __name__ == "__main__":
     main()
