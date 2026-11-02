@@ -15,6 +15,7 @@ class Match(TypedDict):
 
 
 MINIMUM_GAMES: int = 5
+HALF_LIFE_DAY: float = 90.0
 
 
 def parse_date(text: str) -> date:
@@ -40,10 +41,7 @@ def load_history(source: Path, match_date: date) -> list[Match]:
     seen: set[tuple[date, str, str]] = set()
 
     for filename in files:
-        with filename.open(
-            newline="",
-            encoding="utf-8-sig",
-        ) as file:
+        with filename.open(newline="", encoding="utf-8-sig") as file:
             for row in csv.DictReader(file):
                 if not row.get("Date", "").strip():
                     continue
@@ -93,71 +91,82 @@ def load_history(source: Path, match_date: date) -> list[Match]:
     return matches
 
 
-def team_rates(matches: list[Match], team: str, at_home: bool, league_scored: float, league_conceded: float,) -> tuple[float, float]:
-    """Return scoring and conceding rates for one venue."""
-    games: int = 0
-    scored: int = 0
-    conceded: int = 0
+def match_weight(played_on: date, match_date: date) -> float:
+    """Recent matches receive more weight."""
+    days_old: int = (match_date - played_on).days
+
+    return math.exp(
+        -math.log(2.0) * days_old / HALF_LIFE_DAY
+    )
+
+
+def team_rates(matches: list[Match], team: str, at_home: bool, league_scored: float, league_conceded: float, match_date: date) -> tuple[float, float]:
+    """Return weighted scoring and conceding rates."""
+    total_weight: float = 0.0
+    scored: float = 0.0
+    conceded: float = 0.0
 
     for match in matches:
+        weight: float = match_weight(match["played_on"], match_date)
+
         if at_home and match["home"] == team:
-            games += 1
-            scored += match["home_goals"]
-            conceded += match["away_goals"]
+            total_weight += weight
+            scored += match["home_goals"] * weight
+            conceded += match["away_goals"] * weight
 
         elif not at_home and match["away"] == team:
-            games += 1
-            scored += match["away_goals"]
-            conceded += match["home_goals"]
+            total_weight += weight
+            scored += match["away_goals"] * weight
+            conceded += match["home_goals"] * weight
 
-    if games >= MINIMUM_GAMES:
-        return scored / games, conceded / games
+    if total_weight >= MINIMUM_GAMES:
+        return scored / total_weight, conceded / total_weight
 
-    # Starting weight disappears after five actual games.
-    missing_games: int = MINIMUM_GAMES - games
+    # Use league averages when weighted history is limited.
+    missing_weight: float = MINIMUM_GAMES - total_weight
 
     scoring_rate: float = (
-        scored + missing_games * league_scored
+        scored + missing_weight * league_scored
     ) / MINIMUM_GAMES
 
     conceding_rate: float = (
-        conceded + missing_games * league_conceded
+        conceded + missing_weight * league_conceded
     ) / MINIMUM_GAMES
 
     return scoring_rate, conceding_rate
 
 
-def expected_goals(matches: list[Match], home_team: str, away_team: str,) -> tuple[float, float]:
-    """Calculate expected home and away goals."""
-    league_home: float = (
-        sum(match["home_goals"] for match in matches)
-        / len(matches)
-    )
+def expected_goals(matches: list[Match], home_team: str, away_team: str, match_date: date) -> tuple[float, float]:
+    """Calculate expected goals using weighted rates."""
+    if not math.isfinite(HALF_LIFE_DAY) or HALF_LIFE_DAY <= 0:
+        raise ValueError("Half-life must be finite and positive.")
 
-    league_away: float = (
-        sum(match["away_goals"] for match in matches)
-        / len(matches)
-    )
+    total_weight: float = 0.0
+    home_goals: float = 0.0
+    away_goals: float = 0.0
+
+    for match in matches:
+        weight: float = match_weight(match["played_on"], match_date)
+
+        total_weight += weight
+        home_goals += match["home_goals"] * weight
+        away_goals += match["away_goals"] * weight
+
+    if total_weight <= 0:
+        raise ValueError("No weighted history available.")
+
+    league_home: float = home_goals / total_weight
+    league_away: float = away_goals / total_weight
 
     if league_home <= 0 or league_away <= 0:
-        raise ValueError(
-            "League scoring averages must be positive."
-        )
+        raise ValueError("League scoring averages must be positive.")
 
     home_scored, home_conceded = team_rates(
-        matches,
-        home_team,
-        True,
-        league_home,
-        league_away,
+        matches, home_team, True, league_home, league_away, match_date
     )
 
     away_scored, away_conceded = team_rates(
-        matches,
-        away_team,
-        False,
-        league_away,
-        league_home,
+        matches, away_team, False, league_away, league_home, match_date
     )
 
     home_attack: float = home_scored / league_home
@@ -166,13 +175,8 @@ def expected_goals(matches: list[Match], home_team: str, away_team: str,) -> tup
     home_weakness: float = home_conceded / league_away
     away_weakness: float = away_conceded / league_home
 
-    home_mean: float = (
-        league_home * home_attack * away_weakness
-    )
-
-    away_mean: float = (
-        league_away * away_attack * home_weakness
-    )
+    home_mean: float = league_home * home_attack * away_weakness
+    away_mean: float = league_away * away_attack * home_weakness
 
     return home_mean, away_mean
 
@@ -181,7 +185,7 @@ def poisson(goals: int, mean: float) -> float:
     """Return the probability of scoring exactly this many goals."""
     return (
         math.exp(-mean)
-        * mean ** goals
+        * math.pow(mean, goals)
         / math.factorial(goals)
     )
 
@@ -194,9 +198,7 @@ def predict(home_mean: float, away_mean: float) -> tuple[dict[str, float], int, 
         or home_mean < 0
         or away_mean < 0
     ):
-        raise ValueError(
-            "Expected goals must be finite and nonnegative."
-        )
+        raise ValueError("Expected goals must be finite and nonnegative.")
 
     probabilities: dict[str, float] = {
         "Home win": 0.0,
@@ -205,13 +207,11 @@ def predict(home_mean: float, away_mean: float) -> tuple[dict[str, float], int, 
     }
 
     home_chances: list[float] = [
-        poisson(goals, home_mean)
-        for goals in range(21)
+        poisson(goals, home_mean) for goals in range(21)
     ]
 
     away_chances: list[float] = [
-        poisson(goals, away_mean)
-        for goals in range(21)
+        poisson(goals, away_mean) for goals in range(21)
     ]
 
     best_home_goals: int = 0
@@ -240,11 +240,8 @@ def predict(home_mean: float, away_mean: float) -> tuple[dict[str, float], int, 
     total: float = sum(probabilities.values())
 
     if abs(1 - total) > 1e-8:
-        raise ValueError(
-            "Increase the goal range in predict()."
-        )
+        raise ValueError("Increase the goal range in predict().")
 
-    # Adjust for the tiny probability beyond the goal range.
     for outcome in probabilities:
         probabilities[outcome] /= total
 
@@ -281,10 +278,11 @@ def main() -> None:
         matches,
         args.home_team,
         args.away_team,
+        match_date,
     )
 
     (
-probabilities,
+        probabilities,
         best_home_goals,
         best_away_goals,
         best_score_probability,
@@ -292,18 +290,13 @@ probabilities,
     ) = predict(
         home_mean,
         away_mean,
-
     )
 
-    first_used: date = min(
-        match["played_on"] for match in matches
-    )
-
-    last_used: date = max(
-        match["played_on"] for match in matches
-    )
+    first_used: date = min(match["played_on"] for match in matches)
+    last_used: date = max(match["played_on"] for match in matches)
 
     print("History mode: all available earlier results")
+    print(f"Recency half-life: {HALF_LIFE_DAY:g} days")
     print(f"Match: {args.home_team} vs {args.away_team}")
     print(f"Prediction date: {match_date:%d/%m/%Y}")
     print(f"First historical match used: {first_used:%d/%m/%Y}")
@@ -316,15 +309,16 @@ probabilities,
         print(f"{outcome}: {probability:.2%}")
 
     print(
-    f"Most likely exact score: "
-    f"{best_home_goals}-{best_away_goals} "
-    f"(home-away)"
-)
+        f"Most likely exact score: "
+        f"{best_home_goals}-{best_away_goals} "
+        f"(home-away)"
+    )
 
     print(
-    f"Exact-score probability: "
-    f"{best_score_probability / total:.2%}"
-)
+        f"Exact-score probability: "
+        f"{best_score_probability / total:.2%}"
+    )
+
 
 if __name__ == "__main__":
     main()
