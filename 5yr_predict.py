@@ -306,9 +306,5 @@ def main() -> None:
     for outcome, probability in probabilities.items():
         print(f"{outcome}: {probability:.2%}")
 
-    print("Team names must match the CSV exactly.")
-    print("Limited-history teams use league-average starting rates.")
-
-
 if __name__ == "__main__":
     main()
