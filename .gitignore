@@ -1,0 +1,10 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+.mypy_cache/
+
+# Generated output
+results/
